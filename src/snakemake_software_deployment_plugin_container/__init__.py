@@ -3,6 +3,7 @@ __copyright__ = "Copyright 2025, ben carrillo"
 __email__ = "ben.uzh@pm.me"
 __license__ = "MIT"
 import os.path
+import shlex
 import tempfile
 
 from dataclasses import dataclass, field
@@ -142,7 +143,7 @@ class ContainerEnv(EnvBase):
             containercache=repr(containercache),
             image_id=image,
             shell="/bin/sh",
-            cmd=cmd.replace("'", r"'\''"),
+            cmd=shlex.quote(cmd),
         )
 
         return decorated_cmd
