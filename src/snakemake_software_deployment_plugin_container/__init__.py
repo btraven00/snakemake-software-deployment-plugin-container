@@ -2,8 +2,10 @@ __author__ = "ben carrillo"
 __copyright__ = "Copyright 2025, ben carrillo"
 __email__ = "ben.uzh@pm.me"
 __license__ = "MIT"
+import json
 import os.path
 import shlex
+import subprocess
 import tempfile
 
 from dataclasses import dataclass, field
@@ -98,8 +100,6 @@ class ContainerEnv(EnvBase):
         if self.spec.image_uri == "":
             raise WorkflowError("Image URI is empty")
 
-        # TODO: if we don't get the tag, we should assume :latest
-
         if self.settings.kind not in ContainerType.all():
             raise WorkflowError("Invalid container kind")
 
@@ -155,12 +155,84 @@ class ContainerEnv(EnvBase):
         # to determine the hash.
         hash_object.update(...)
 
-    # TODO: report on the hash of the actually retreived image and dereference the URI with repo.
     def report_software(self) -> Iterable[SoftwareReport]:
         uri, tag = self._get_image_uri_and_tag()
         image = SoftwareReport(
             name=uri,
-            # there's only one version slot, but we could append tag + hash
             version=tag,
         )
+
+        # In addition to the image tag, we also want to include the full image id in the version
+        # reporting.
+        # TODO: can move the managers to the initialization to encapsulate backend-specific logic
+        # TODO: we can retrieve the dereferenced URI from the image repo. But different backends
+        # have different ways of representing the metadata.
+        if self.settings.kind == ContainerType.PODMAN:
+            pm = PodmanManager()
+        elif self.settings.kind == ContainerType.UDOCKER:
+            pm = UDockerManager()
+        full_image_id = pm.inspect_image(uri)
+        if full_image_id != "":
+            image.version = f"{image.version}/{full_image_id}"
+
         yield image
+
+
+class UDockerManager:
+    cmd = ContainerType.UDOCKER.item_to_choice()
+
+    def inspect_image(self, image_id) -> str:
+        try:
+            # Run udocker inspect command
+            result = subprocess.run(
+                [self.cmd, "inspect", image_id],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            # Parse the output as JSON
+            inspect_data = json.loads(result.stdout)
+
+            # Extract the hash from rootfs.diff_ids
+            if "rootfs" in inspect_data and "diff_ids" in inspect_data["rootfs"]:
+                if len(inspect_data["rootfs"]["diff_ids"]) > 0:
+                    diff_id = inspect_data["rootfs"]["diff_ids"][0]
+                    # Remove sha256: prefix if present
+                    if diff_id.startswith("sha256:"):
+                        return diff_id[7:19]  # First 12 chars after prefix
+                    return diff_id[:12]
+
+            return ""  # Return empty string if hash not found
+
+        except (
+            subprocess.CalledProcessError,
+            json.JSONDecodeError,
+            KeyError,
+            IndexError,
+        ) as e:
+            print(f"error: failed to extract hash for udocker image {image_id}: {e}")
+            return ""
+
+
+class PodmanManager:
+    cmd = ContainerType.PODMAN.item_to_choice()
+
+    def inspect_image(self, image_id) -> str:
+        try:
+            result = subprocess.run(
+                [self.cmd, "inspect", image_id],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            inspect_data = json.loads(result.stdout)
+            full_image_id = inspect_data[0]["Id"]
+            truncated = full_image_id[:12]
+            return truncated
+        except subprocess.CalledProcessError as e:
+            print(f"error: failed to inspect image {image_id}: {e}")
+            return ""
+        except (KeyError, IndexError, json.JSONDecodeError) as e:
+            print(f"error: failed to parse output for image {image_id}: {e}")
+            return ""
