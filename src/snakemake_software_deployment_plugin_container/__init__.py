@@ -29,6 +29,9 @@ from snakemake_interface_common.settings import SettingsEnumBase
 # The mountpoint for the Snakemake working directory inside the container.
 SNAKEMAKE_MOUNTPOINT = "/mnt/snakemake"
 
+# Where the source-cache dir is found under the cache folder
+SOURCE_CACHE = "snakemake/source-cache"
+
 
 # ContainerType is an enum that defines the different container types we support.
 # If adding new ones, make sure the choice is the same as the command name.
@@ -76,6 +79,14 @@ class ContainerEnv(EnvBase):
     def __post_init__(self) -> None:
         self.check()
 
+    def _get_image_uri_and_tag(self) -> Iterable[str]:
+        parts = self.spec.image_uri.split(":")
+        if len(parts) > 2:
+            raise WorkflowError("Malformed image URI", self.spec.image_uri)
+        if len(parts) != 2:
+            parts += ["latest"]
+        return parts
+
     # The decorator ensures that the decorated method is only called once
     # in case multiple environments of the same kind are created.
     @EnvBase.once
@@ -103,11 +114,10 @@ class ContainerEnv(EnvBase):
 
     def decorate_shellcmd(self, cmd: str) -> str:
         # TODO pass more options here (extra mount volumes, user etc)
+        image = ":".join(self._get_image_uri_and_tag())
 
-        hostcache = os.path.join(get_appdirs().user_cache_dir, "snakemake/source-cache")
-        containercache = os.path.join(
-            SNAKEMAKE_MOUNTPOINT, ".cache/snakemake/source-cache"
-        )
+        hostcache = os.path.join(get_appdirs().user_cache_dir, SOURCE_CACHE)
+        containercache = os.path.join(SNAKEMAKE_MOUNTPOINT, ".cache", SOURCE_CACHE)
 
         if not os.path.exists(hostcache):
             hostcache = containercache = tempfile.mkdtemp()
@@ -130,7 +140,7 @@ class ContainerEnv(EnvBase):
             hostdir=repr(getcwd()),  # TODO: allow to override
             hostcache=repr(hostcache),
             containercache=repr(containercache),
-            image_id=self.spec.image_uri,
+            image_id=image,
             shell="/bin/sh",
             cmd=cmd.replace("'", r"'\''"),
         )
@@ -144,15 +154,12 @@ class ContainerEnv(EnvBase):
         # to determine the hash.
         hash_object.update(...)
 
+    # TODO: report on the hash of the actually retreived image and dereference the URI with repo.
     def report_software(self) -> Iterable[SoftwareReport]:
-        # Report the software contained in the environment. This should be a list of
-        # snakemake_interface_software_deployment_plugins.SoftwareReport data class.
-        # Use SoftwareReport.is_secondary = True if the software is just some
-        # less important technical dependency. This allows Snakemake's report to
-        # hide those for clarity. In case of containers, it is also valid to
-        # return the container URI as a "software".
-        # Return an empty tuple () if no software can be reported.
-        # TODO: implement.
-        # Get container URI + hash (assuming we've already executd and fetched the image,
-        # so that we can get the hash for the image plus the tag)
-        return ()
+        uri, tag = self._get_image_uri_and_tag()
+        image = SoftwareReport(
+            name=uri,
+            # there's only one version slot, but we could append tag + hash
+            version=tag,
+        )
+        yield image
